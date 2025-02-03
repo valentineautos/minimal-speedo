@@ -19,8 +19,8 @@ Preferences prefs;
 // ESPNow structures
 typedef struct struct_speedo {
   uint8_t flag;
-  uint8_t speed_kmph;
   uint8_t speed_mph;
+  uint8_t speed_kmph;
   int8_t fuel_perc;
 } struct_speedo;
 
@@ -32,7 +32,6 @@ struct_buttons ButtonData;
 // Screens
 lv_obj_t *startup_scr;              // Black startup screen
 lv_obj_t *splash_scr;               // Splash screen
-lv_obj_t *splash_scr_b;             // Splash screen
 lv_obj_t *daily_scr;                // Daily screen
 lv_obj_t *track_scr;                // Track screen
 lv_obj_t *dimmer;                   // Dimmer overlay
@@ -72,6 +71,8 @@ const int MAX_KMPH_TICK_FREQ = 30;
 // ESPNow checks
 volatile bool data_ready = false;
 volatile bool button_pressed = false;
+bool startup_ready = false;
+bool startup_complete = false;
 
 // LVGL Time
 hw_timer_t* timer = nullptr;
@@ -151,15 +152,16 @@ void make_styles(void) {
 
 // ESPNow received
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  // Setting new channel from GPS sender 
-  if (len == 1) {
-    uint8_t new_channel = incomingData[0];
-    esp_wifi_set_channel(new_channel, WIFI_SECOND_CHAN_NONE);
-    return;
-  } 
-
   // Write to the correct structure based on ESPNow flag
   switch (incomingData[0]) {
+    case (FLAG_STARTUP):
+      startup_ready = true;
+      break;
+    case (FLAG_SET_CHANNEL): {
+      int8_t new_channel = incomingData[1];
+      esp_wifi_set_channel(new_channel, WIFI_SECOND_CHAN_NONE);
+      break;
+    }
     case (FLAG_BUTTONS):
       memcpy(&ButtonData, incomingData, sizeof(ButtonData));
       button_pressed = true;
@@ -450,11 +452,11 @@ void make_splash_screen(void) {
   splash_scr = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(splash_scr, PALETTE_BLACK, 0);
 
-  lv_obj_t *icon_three = lv_img_create(splash_scr);
-  lv_img_set_src(icon_three, &splash_5);
-  lv_obj_align(icon_three, LV_ALIGN_CENTER, 0, 0);
-  lv_obj_set_style_img_recolor(icon_three, PALETTE_WHITE, 0);
-  lv_obj_set_style_img_recolor_opa(icon_three, LV_OPA_COVER, 0);
+  lv_obj_t *icon_five = lv_img_create(splash_scr);
+  lv_img_set_src(icon_five, &splash_5);
+  lv_obj_align(icon_five, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_img_recolor(icon_five, PALETTE_WHITE, 0);
+  lv_obj_set_style_img_recolor_opa(icon_five, LV_OPA_COVER, 0);
 }
 
 void make_daily_screen(void) {
@@ -484,6 +486,7 @@ void make_dimmer(void) {
     update_brightness();
 }
 
+// Two step managed 
 bool complete = false; // flag for screen changes to prevent recurssion
 
 void change_loading_scr(lv_timer_t *timer) {
@@ -497,28 +500,32 @@ void change_loading_scr(lv_timer_t *timer) {
   }
 }
 
+// if no startup message received, start anyway
+void force_splash(lv_timer_t *timer) {
+  // avoid refire if complete
+  if (!startup_complete) {
+    start_splash();
+    startup_complete = true;
+  }
+}
+
+// load the splash screen
+void start_splash() {
+  lv_scr_load_anim(splash_scr, LV_SCR_LOAD_ANIM_FADE_IN, 1000, 0, false);
+  
+  lv_timer_t *exit_timer = lv_timer_create(change_loading_scr, 3500, startup_scr); // back to blank
+  lv_timer_set_repeat_count(exit_timer, 1);
+}
+
 // initial load and default screens
 void make_ui() {
   make_styles();
 
   // Create initial screen
+  make_splash_screen();
   make_daily_screen();
   make_track_screen(); 
   make_dimmer();
-
-  if (DO_SPLASH) {
-    make_splash_screen();
-    lv_scr_load_anim(splash_scr, LV_SCR_LOAD_ANIM_FADE_IN, 1000, 500, false);
-
-    lv_timer_t *exit_timer = lv_timer_create(change_loading_scr, 3500, startup_scr); // back to blank
-    lv_timer_set_repeat_count(exit_timer, 1);
-  } else {
-    if (is_track_mode) {
-      lv_scr_load(track_scr);
-    } else {
-      lv_scr_load(daily_scr);
-    }
-  }
 }
 
 // Initialise startup values
@@ -551,10 +558,19 @@ void setup()
   init_values();
 
   timer_init();
+
+  lv_timer_t *startup_timer = lv_timer_create(force_splash, STARTUP_OVERRIDE_TIMER, startup_scr); // back to blank
+  lv_timer_set_repeat_count(startup_timer, 1);
 }
 
 void loop(){
   lv_timer_handler();
+
+  if (startup_ready && !startup_complete) {
+      delay(120);
+      start_splash();
+      startup_ready = false;
+    }
 
   if (data_ready) {
     update_levels();
